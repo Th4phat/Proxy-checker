@@ -3,120 +3,121 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
+var (
+	proxy_buffer []string
+	wg           sync.WaitGroup
+)
+
+const (
+	IP_API_URL string = "https://api.ipify.org/" // url that reuturn ip address as a raw text
+)
+
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Print("== Http Proxy checker ==\n\n")
-		fmt.Printf("usage:%s [input file] [output file]", os.Args[0])
-		return
+	if len(os.Args) < 3 {
+		fmt.Print("== Http Proxy checker ==\n")
+		fmt.Printf("usage: %s [input file] [output file]", os.Args[0])
+		os.Exit(0)
 	}
-	var corndog []string
-	mypp := getmypp()
-	proxies := ppl(os.Args[1])
-	results := make(chan string)
+	input_file := os.Args[1]
+	output_file := os.Args[2]
 
-	for _, proxy := range proxies {
-		go saygex(proxy, mypp, results)
-	}
+	input_file_reader, err := os.Open(input_file)
 
-	for i := 0; i < len(proxies); i++ {
-		result := <-results
-		if result != "" {
-			corndog = append(corndog, result)
-		}
-	}
-	err := ioutil.WriteFile(os.Args[2], []byte(strings.Join(corndog, "\n")), 0644)
 	if err != nil {
 		fmt.Println(err)
 	}
-	fmt.Print("Finished yipee!")
+	scanner := bufio.NewScanner(input_file_reader)
+	scanner.Split(bufio.ScanLines)
+
+	for scanner.Scan() {
+		proxy_buffer = append(proxy_buffer, scanner.Text())
+	}
+
+	input_file_reader.Close()
+
+	out_file, err := os.OpenFile(output_file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer out_file.Close()
+
+	start_ip := getstarter_ip()
+
+	for _, line := range proxy_buffer {
+		//fmt.Println("checking", line)
+		wg.Add(1)
+		go checker(line, start_ip, out_file, &wg)
+	}
+	wg.Wait()
+
+	fmt.Printf("finished :D | checked %s to see result\n", output_file)
 }
 
-func saygex(proxy, mypp string, results chan string) {
-	proxyuri := parsUrl(proxy)
+func checker(proxyURL, startIP string, outputFile *os.File, wg *sync.WaitGroup) {
+	defer wg.Done()
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		//fmt.Println(err)
+		return
+	}
+
 	client := &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyuri),
+			Proxy: http.ProxyURL(parsed),
 		},
-		Timeout: 30 * time.Second,
+		Timeout: 10 * time.Second,
 	}
-	resp, err := client.Get("https://ipinfo.io/ip")
+
+	resp, err := client.Get(IP_API_URL)
 	if err != nil {
-		results <- ""
+		//fmt.Println(err)
 		return
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		//fmt.Println(err)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		results <- ""
+		//fmt.Println(err)
 		return
 	}
 
 	ip := strings.TrimSpace(string(body))
-	if ip != mypp {
-		fmt.Println("Proxy", proxy, "working!")
-		results <- proxy
-		return
-	}
+	if ip != startIP {
+		//fmt.Printf("Proxy %q working! Returned IP: %s\n", proxyURL, ip)
 
-	results <- ""
-	return
+		if _, err := outputFile.WriteString(proxyURL + "\n"); err != nil {
+			fmt.Println(err)
+		}
+	}
 }
 
-func getmypp() string {
-	resp, err := http.Get("https://ipinfo.io/ip")
+func getstarter_ip() string {
+	resp, err := http.Get(IP_API_URL)
 	if err != nil {
-		fmt.Println("Error getting public IP address:", err)
+		fmt.Println(err)
 		return ""
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("Error getting public IP address:", err)
+		fmt.Println(err)
 		return ""
 	}
 
 	return strings.TrimSpace(string(body))
-}
-
-func parsUrl(urlStr string) *url.URL {
-	parsed, err := url.Parse(strings.TrimRight("http://"+urlStr, "\r"))
-	if err != nil {
-		panic(fmt.Sprintf("failed to parse URL %q: %s", urlStr, err))
-	}
-	return parsed
-}
-func ppl(uncheck_file string) []string {
-	var unchecklist []string
-	file, err := os.Open(uncheck_file)
-	if err != nil {
-		fmt.Println("Error:", err)
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		unchecklist = append(unchecklist, scanner.Text())
-	}
-	rmdupe_uncheck_list := noduping(unchecklist)
-	return rmdupe_uncheck_list
-}
-func noduping(proxies []string) []string {
-	uniqueProxies := make(map[string]struct{})
-	for _, proxy := range proxies {
-		uniqueProxies[proxy] = struct{}{}
-	}
-	var result []string
-	for proxy := range uniqueProxies {
-		result = append(result, proxy)
-	}
-	return result
 }
